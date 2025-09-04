@@ -6,7 +6,13 @@ A Model Context Protocol (MCP) server that downloads bytecode for Sui blockchain
 
 ### Claude code
 
-Make sure that docker is installed. Add the following configuration to the claude config under `mpcServers` key (typically `~/.claude.json`):
+Make sure that docker is installed. Build the image:
+
+```bash
+docker build -t suisource-mcp .
+```
+
+Add the following configuration to the claude config under `mpcServers` key (typically `~/.claude.json`):
 
 ```json
 ...
