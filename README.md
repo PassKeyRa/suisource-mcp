@@ -15,7 +15,6 @@ docker build -t suisource-mcp .
 Add the following configuration to the claude config under `mpcServers` key (typically `~/.claude.json`):
 
 ```json
-...
 "mcpServers": {
   "suisource": {
     "command": "docker",
@@ -29,7 +28,6 @@ Add the following configuration to the claude config under `mpcServers` key (typ
     ]
   }
 }
-...
 ```
 
 It is recommended to do not change the mounted `/tmp/suisource-mcp` directory, since it is used to share the decompiled sources between host and container.
