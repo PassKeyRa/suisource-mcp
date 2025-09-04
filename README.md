@@ -12,7 +12,7 @@ Make sure that docker is installed. Build the image:
 docker build -t suisource-mcp .
 ```
 
-Add the following configuration to the claude config under `mpcServers` key (typically `~/.claude.json`):
+Add the following configuration to the claude config under the `mpcServers` key (typically `~/.claude.json`):
 
 ```json
 "mcpServers": {
