@@ -8,7 +8,8 @@ import shutil
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import Dict, Any
+from typing import Dict, Any, List, Optional, Tuple
+from datetime import datetime
 
 import aiohttp
 from fastmcp import FastMCP
@@ -23,6 +24,9 @@ mcp = FastMCP("Sui Source Code Decompiler")
 # Default Sui RPC endpoint
 SUI_RPC_URL = os.getenv("SUI_RPC_URL", "https://fullnode.mainnet.sui.io/")
 WORKDIR = os.getenv("WORKDIR", "/workdir")
+
+# GraphQL endpoint for project information
+GRAPHQL_URL = "https://strapi-dev.scand.app/graphql"
 
 @mcp.tool()
 async def health_check() -> dict:
@@ -289,6 +293,466 @@ async def get_source_code(package_id: str) -> dict:
         dict: Status and details of the decompilation process
     """
     return await _get_source_code_impl(package_id)
+
+
+async def get_project_info_from_graphql(package_id: str) -> Optional[Dict[str, Any]]:
+    """
+    Get project information from GraphQL API using a package ID.
+    
+    Args:
+        package_id: The Sui package ID
+        
+    Returns:
+        Project information or None if not found
+    """
+    try:
+        query = """
+        fragment projectEntity on ProjectEntity {
+          attributes {
+            ProjectName
+            publishedAt
+            SubmitterAddress
+            ProjectWebsite
+            ProjectWhitepaper
+            ProjectGithub
+            ProjectImage {
+              data {
+                attributes {
+                  url
+                  __typename
+                }
+                __typename
+              }
+              __typename
+            }
+            FullDescription
+            ShortDescription
+            DexLink
+            PoolLink
+            email
+            linkedin
+            discord
+            twitter
+            telegram
+            medium
+            mirror
+            facebook
+            wechat
+            link3
+            reddit
+            slack
+            categories(pagination: {start: 0, limit: -1}) {
+              data {
+                attributes {
+                  Category
+                  __typename
+                }
+                __typename
+              }
+              __typename
+            }
+            ImgSlider {
+              data {
+                attributes {
+                  Files {
+                    data {
+                      attributes {
+                        url
+                        name
+                        __typename
+                      }
+                      __typename
+                    }
+                    __typename
+                  }
+                  isEnabled
+                  __typename
+                }
+                __typename
+              }
+              __typename
+            }
+            BackgroundImage {
+              data {
+                attributes {
+                  url
+                  __typename
+                }
+                __typename
+              }
+              __typename
+            }
+            categories_related {
+              data {
+                attributes {
+                  Category
+                  __typename
+                }
+                __typename
+              }
+              __typename
+            }
+            tokens(pagination: {start: 0, limit: -1}) {
+              data {
+                attributes {
+                  TokenId
+                  TokenName
+                  TokenLabel
+                  __typename
+                }
+                __typename
+              }
+              __typename
+            }
+            contracts(pagination: {start: 0, limit: -1}) {
+              data {
+                attributes {
+                  ContractId
+                  ContractLabel
+                  ContractName
+                  __typename
+                }
+                __typename
+              }
+              __typename
+            }
+            chains {
+              data {
+                attributes {
+                  ChainName
+                  __typename
+                }
+                __typename
+              }
+              __typename
+            }
+            __typename
+          }
+          __typename
+        }
+
+        query package($hash: String) {
+          contracts(filters: {ContractId: {eq: $hash}, chain: {ChainName: {eq: "Sui"}}}) {
+            data {
+              attributes {
+                ContractName
+                ContractId
+                project {
+                  data {
+                    ...projectEntity
+                    __typename
+                  }
+                  __typename
+                }
+                __typename
+              }
+              __typename
+            }
+            __typename
+          }
+        }
+        """
+
+        payload = {
+            "operationName": "package",
+            "variables": {"hash": package_id},
+            "query": query
+        }
+
+        headers = {
+            'accept': '*/*',
+            'accept-language': 'en-GB,en-US;q=0.9,en;q=0.8',
+            'content-type': 'application/json',
+            'origin': 'https://suiscan.xyz',
+            'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36'
+        }
+
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                GRAPHQL_URL,
+                headers=headers,
+                json=payload
+            ) as response:
+                if response.status != 200:
+                    logger.error(f"GraphQL HTTP error {response.status}: {await response.text()}")
+                    return None
+                
+                data = await response.json()
+                
+                if "errors" in data:
+                    logger.error(f"GraphQL errors: {data['errors']}")
+                    return None
+                
+                contracts = data.get("data", {}).get("contracts", {}).get("data", [])
+                if not contracts:
+                    logger.warning(f"No project found for package ID: {package_id}")
+                    return None
+                
+                return contracts[0].get("attributes", {}).get("project", {}).get("data", {})
+
+    except Exception as e:
+        logger.error(f"Error fetching project info from GraphQL: {e}")
+        return None
+
+
+async def get_package_transactions(package_id: str, limit: int = 200) -> List[Dict[str, Any]]:
+    """
+    Get transaction history for a package to determine update times and versions.
+    
+    Args:
+        package_id: The Sui package ID
+        limit: Maximum number of transactions to fetch
+        
+    Returns:
+        List of transaction data
+    """
+    try:
+        rpc_payload = {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "suix_queryTransactionBlocks",
+            "params": [
+                {
+                    "filter": {
+                        "ChangedObject": package_id
+                    },
+                    "options": {
+                        "showEffects": True,
+                        "showBalanceChanges": True,
+                        "showInput": True
+                    }
+                },
+                None,
+                limit,
+                True  # descending order
+            ]
+        }
+
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                SUI_RPC_URL,
+                headers={"Content-Type": "application/json"},
+                json=rpc_payload
+            ) as response:
+                if response.status != 200:
+                    logger.error(f"Transaction query HTTP error {response.status}: {await response.text()}")
+                    return []
+                
+                data = await response.json()
+                
+                if "error" in data:
+                    logger.error(f"Transaction query RPC error: {data['error']}")
+                    return []
+                
+                return data.get("result", {}).get("data", [])
+
+    except Exception as e:
+        logger.error(f"Error fetching package transactions: {e}")
+        return []
+
+
+async def get_package_modules(package_id: str) -> List[str]:
+    """
+    Get list of modules in a package.
+    
+    Args:
+        package_id: The Sui package ID
+        
+    Returns:
+        List of module names
+    """
+    try:
+        module_bytecode = await download_package_bytecode(package_id)
+        return list(module_bytecode.keys())
+    except Exception as e:
+        logger.error(f"Error getting package modules: {e}")
+        return []
+
+
+async def get_package_info_detailed(package_id: str, project_contracts: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Get detailed information about a specific package including modules and update history.
+    
+    Args:
+        package_id: The Sui package ID
+        project_contracts: List of all contracts in the project
+        
+    Returns:
+        Package information with modules and update history
+    """
+    try:
+        # Find this package in the project contracts list
+        package_info = None
+        for contract in project_contracts:
+            if contract.get("ContractId") == package_id:
+                package_info = contract
+                break
+        
+        if not package_info:
+            package_info = {
+                "ContractId": package_id,
+                "ContractName": f"Package {package_id[:8]}...",
+                "ContractLabel": "Package"
+            }
+
+        # Get modules in this package
+        modules = await get_package_modules(package_id)
+        
+        # Get transaction history to determine last update time and version
+        transactions = await get_package_transactions(package_id, 50)
+        
+        last_update_time = None
+        version = None
+        
+        if transactions:
+            # Most recent transaction (first in descending order)
+            latest_tx = transactions[0]
+            timestamp_ms = latest_tx.get("timestampMs")
+            
+            if timestamp_ms:
+                last_update_time = datetime.fromtimestamp(int(timestamp_ms) / 1000).isoformat()
+            
+            # Look for version in effects
+            effects = latest_tx.get("effects", {})
+            created = effects.get("created", [])
+            
+            for created_obj in created:
+                if created_obj.get("reference", {}).get("objectId") == package_id:
+                    version = created_obj.get("reference", {}).get("version")
+                    break
+
+        return {
+            "package_id": package_id,
+            "name": package_info.get("ContractName", "Unknown"),
+            "label": package_info.get("ContractLabel", "Package"),
+            "modules": modules,
+            "module_count": len(modules),
+            "last_update_time": last_update_time,
+            "version": version,
+            "transaction_count": len(transactions)
+        }
+
+    except Exception as e:
+        logger.error(f"Error getting detailed package info for {package_id}: {e}")
+        return {
+            "package_id": package_id,
+            "name": f"Package {package_id[:8]}...",
+            "label": "Package",
+            "modules": [],
+            "module_count": 0,
+            "last_update_time": None,
+            "version": None,
+            "transaction_count": 0,
+            "error": str(e)
+        }
+
+
+@mcp.tool()
+async def get_project_info(package_id: str) -> dict:
+    """
+    Get project information including all packages, modules, and version history.
+    Takes one of the project's package IDs and returns complete project information
+    with all packages sorted by their last change time.
+    
+    Args:
+        package_id: One of the project's package IDs (hex string starting with 0x)
+        
+    Returns:
+        dict: Complete project information with packages, modules, and version history
+    """
+    try:
+        logger.info(f"Getting project info for package {package_id}")
+        
+        # Step 1: Get project information from GraphQL
+        project_data = await get_project_info_from_graphql(package_id)
+        
+        if not project_data:
+            return {
+                "success": False,
+                "error": f"No project found for package ID: {package_id}",
+                "package_id": package_id
+            }
+        
+        project_attrs = project_data.get("attributes", {})
+        
+        # Step 2: Extract all contracts/packages from the project
+        contracts_data = project_attrs.get("contracts", {}).get("data", [])
+        package_ids = []
+        
+        for contract in contracts_data:
+            contract_attrs = contract.get("attributes", {})
+            contract_id = contract_attrs.get("ContractId")
+            if contract_id and contract_attrs.get("ContractLabel") == "Package":
+                package_ids.append(contract_attrs)
+        
+        logger.info(f"Found {len(package_ids)} packages in project")
+        
+        # Step 3: Get detailed information for each package
+        package_details = []
+        for contract_info in package_ids:
+            pkg_id = contract_info.get("ContractId")
+            if pkg_id:
+                package_detail = await get_package_info_detailed(pkg_id, contracts_data)
+                package_details.append(package_detail)
+        
+        # Step 4: Sort packages by last update time (most recent first)
+        def get_update_time(pkg):
+            update_time = pkg.get("last_update_time")
+            if update_time:
+                try:
+                    return datetime.fromisoformat(update_time)
+                except:
+                    return datetime.min
+            return datetime.min
+        
+        package_details.sort(key=get_update_time, reverse=True)
+        
+        # Step 5: Build the complete response
+        result = {
+            "success": True,
+            "query_package_id": package_id,
+            "project": {
+                "name": project_attrs.get("ProjectName", "Unknown Project"),
+                "description_short": project_attrs.get("ShortDescription", ""),
+                "description_full": project_attrs.get("FullDescription", ""),
+                "website": project_attrs.get("ProjectWebsite", ""),
+                "github": project_attrs.get("ProjectGithub", ""),
+                "published_at": project_attrs.get("publishedAt", ""),
+                "social_links": {
+                    "discord": project_attrs.get("discord", ""),
+                    "twitter": project_attrs.get("twitter", ""),
+                    "telegram": project_attrs.get("telegram", ""),
+                    "medium": project_attrs.get("medium", ""),
+                    "email": project_attrs.get("email", "")
+                },
+                "categories": [
+                    cat.get("attributes", {}).get("Category", "") 
+                    for cat in project_attrs.get("categories", {}).get("data", [])
+                ]
+            },
+            "packages": package_details,
+            "package_count": len(package_details),
+            "total_modules": sum(pkg.get("module_count", 0) for pkg in package_details),
+            "tokens": [
+                {
+                    "id": token.get("attributes", {}).get("TokenId", ""),
+                    "name": token.get("attributes", {}).get("TokenName", ""),
+                    "label": token.get("attributes", {}).get("TokenLabel", "")
+                }
+                for token in project_attrs.get("tokens", {}).get("data", [])
+            ]
+        }
+        
+        logger.info(f"Successfully retrieved project info: {result['project']['name']} with {result['package_count']} packages")
+        return result
+
+    except Exception as e:
+        logger.error(f"Error in get_project_info: {e}")
+        return {
+            "success": False,
+            "error": f"Failed to get project info: {str(e)}",
+            "package_id": package_id
+        }
 
 
 if __name__ == "__main__":
